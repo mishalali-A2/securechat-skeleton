@@ -230,44 +230,6 @@ Receipt saved to client_receipt_1700000000.json
 - **Non-Repudiation** - Session receipts provide conversation proof
 - **Salted Password Hashing** - Secure credential storage
 
-## File Structure
-
-```
-secure-chat-app/
-├── app/
-│   ├── common/
-│   │   ├── protocol.py    # Message definitions
-│   │   └── utils.py       # Cryptographic utilities
-│   ├── crypto/
-│   │   ├── aes.py         # AES encryption
-│   │   ├── dh.py          # Diffie-Hellman key exchange
-│   │   ├── pki.py         # Certificate handling
-│   │   └── sign.py        # RSA signing
-│   └── storage/
-│       └── db.py          # Database layer
-├── certs/                 # Certificate storage
-├── scripts/
-│   ├── gen_ca.py          # CA generation
-│   ├── gen_cert.py        # Certificate issuance
-│   └── gen_dh_params.py   # DH parameters
-├── client.py              # Chat client
-├── server.py              # Chat server
-└── README.md
-```
-
-## GitHub Repository
-
-📁 **Repository**: [https://github.com/yourusername/secure-chat-app](https://github.com/yourusername/secure-chat-app)
-
-## Troubleshooting
-
-**Certificate Errors**: Ensure all certificate generation steps are completed in order.
-
-**Database Connection**: Verify MySQL service is running and credentials in `.env` are correct.
-
-**Port Conflicts**: Change `SERVER_PORT` in client.py and server.py if 8080 is occupied.
-
-**DH Parameters**: Regenerate if seeing "DH parameters file not found" errors.
 
 ## License
 
