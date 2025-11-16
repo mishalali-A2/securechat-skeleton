@@ -46,66 +46,229 @@ securechat-skeleton/
 └─ .github/workflows/ci.yml  # Compile-only sanity check (no execution)
 ```
 
-## ⚙️ Setup Instructions
+# Secure Chat Application
 
-1. **Fork this repository** to your own GitHub account(using official nu email).  
-   All development and commits must be performed in your fork.
+A secure, end-to-end encrypted chat application with PKI-based authentication, signed messages, and non-repudiation features.
 
-2. **Set up environment**:
-   ```bash
-   python3 -m venv .venv && source .venv/bin/activate
-   pip install -r requirements.txt
-   cp .env.example .env
-   ```
+## Features
 
-3. **Initialize MySQL** (recommended via Docker):
-   ```bash
-   docker run -d --name securechat-db        -e MYSQL_ROOT_PASSWORD=rootpass        -e MYSQL_DATABASE=securechat        -e MYSQL_USER=scuser        -e MYSQL_PASSWORD=scpass        -p 3306:3306 mysql:8
-   ```
+- 🔐 **PKI Authentication** - Certificate-based mutual authentication
+- 🤝 **Diffie-Hellman Key Exchange** - Secure session key establishment
+- 📨 **Signed Messages** - RSA signatures for message integrity and non-repudiation
+- 💬 **Secure Chat** - AES-128 encrypted real-time messaging
+- 📄 **Session Receipts** - Cryptographic proof of conversation participation
+- 🗄️ **MySQL Backend** - Secure user storage with salted password hashing
 
-4. **Create tables**:
-   ```bash
-   python -m app.storage.db --init
-   ```
+## Prerequisites
 
-5. **Generate certificates** (after implementing the scripts):
-   ```bash
-   python scripts/gen_ca.py --name "FAST-NU Root CA"
-   python scripts/gen_cert.py --cn server.local --out certs/server
-   python scripts/gen_cert.py --cn client.local --out certs/client
-   ```
+- Python 3.8+
+- MySQL Server
+- Required Python packages: `cryptography`, `mysql-connector-python`, `python-dotenv`
 
-6. **Run components** (after implementation):
-   ```bash
-   python -m app.server
-   # in another terminal:
-   python -m app.client
-   ```
+## Installation
 
-## 🚫 Important Rules
+1. **Clone the repository**
+```bash
+git clone https://github.com/yourusername/secure-chat-app.git
+cd secure-chat-app
+```
 
-- **Do not use TLS/SSL or any secure-channel abstraction**  
-  (e.g., `ssl`, HTTPS, WSS, OpenSSL socket wrappers).  
-  All crypto operations must occur **explicitly** at the application layer.
+2. **Install dependencies**
+```bash
+pip install cryptography mysql-connector-python python-dotenv
+```
 
-- You are **not required** to implement AES, RSA, or DH math, Use any of the available libraries.
-- Do **not commit secrets** (certs, private keys, salts, `.env` values).
-- Your commits must reflect progressive development — at least **10 meaningful commits**.
+3. **Database Setup**
+```sql
+CREATE DATABASE securechat;
+CREATE USER 'scuser'@'localhost' IDENTIFIED BY 'scpass';
+GRANT ALL PRIVILEGES ON securechat.* TO 'scuser'@'localhost';
+FLUSH PRIVILEGES;
+```
 
-## 🧾 Deliverables
+4. **Environment Configuration**
+Create a `.env` file:
+```env
+DB_HOST=localhost
+DB_PORT=3306
+DB_USER=scuser
+DB_PASSWORD=scpass
+DB_NAME=securechat
+```
 
-When submitting on Google Classroom (GCR):
+## Certificate Generation
 
-1. A ZIP of your **GitHub fork** (repository).
-2. MySQL schema dump and a few sample records.
-3. Updated **README.md** explaining setup, usage, and test outputs.
-4. `RollNumber-FullName-Report-A02.docx`
-5. `RollNumber-FullName-TestReport-A02.docx`
+### 1. Generate Root CA
+```bash
+python scripts/gen_ca.py --name "SecureChat Root CA"
+```
 
-## 🧪 Test Evidence Checklist
+### 2. Generate Server Certificate
+```bash
+python scripts/gen_cert.py --cn "server.local" --out "certs/server"
+```
 
-✔ Wireshark capture (encrypted payloads only)  
-✔ Invalid/self-signed cert rejected (`BAD_CERT`)  
-✔ Tamper test → signature verification fails (`SIG_FAIL`)  
-✔ Replay test → rejected by seqno (`REPLAY`)  
-✔ Non-repudiation → exported transcript + signed SessionReceipt verified offline  
+### 3. Generate Client Certificate  
+```bash
+python scripts/gen_cert.py --cn "client.local" --out "certs/client"
+```
+
+### 4. Generate DH Parameters
+```bash
+python scripts/gen_dh_params.py
+```
+
+### 5. Initialize Database Schema
+```bash
+python -m app.storage.db --init
+```
+
+## Usage
+
+### Starting the Server
+```bash
+python server.py
+```
+
+### Client Operations
+
+**User Registration**
+```bash
+python client.py --register --username "alice" --password "secret123" --email "alice@example.com"
+```
+
+**User Login**
+```bash
+python client.py --login --username "alice" --password "secret123"
+```
+
+## Protocol Flow
+
+1. **Certificate Exchange** - Mutual TLS certificate validation
+2. **Key Exchange** - Diffie-Hellman for session key derivation  
+3. **Authentication** - Encrypted credential exchange
+4. **Secure Chat** - Signed and encrypted messaging
+5. **Session Receipt** - Non-repudiation proof generation
+
+## Sample Output
+
+### Server Startup
+```
+[SERVER] 🟢 Server listening on 127.0.0.1:8080
+[SERVER] 🔐 Signed message enforcement: ENABLED
+[SERVER] 📄 Non-repudiation receipts: ENABLED
+```
+
+### Client Authentication
+```
+[CLIENT] 🔗 Connecting to 127.0.0.1:8080...
+[CLIENT] 🤝 Connected to server successfully.
+[CLIENT] ✅ Server certificate validated successfully.
+[CLIENT] 6. Successfully derived shared session key.
+[CLIENT] 8. Authentication successful. Session established.
+```
+
+### Chat Session
+```
+[CLIENT] 💬 Secure chat session started as 'alice'
+Type your messages below:
+  /quit     - Exit chat and generate session receipt
+  /receipt  - Generate session receipt without exiting
+--------------------------------------------------
+alice> Hello, world!
+[CLIENT] 📨 Sent signed message (seq: 1)
+
+[SERVER]: Hi there!
+alice> 
+```
+
+### Session Receipt
+```
+============================================================
+CLIENT SESSION RECEIPT (Non-Repudiation Proof)
+============================================================
+Peer: client
+Message Range: 1 - 5
+Transcript Hash: a1b2c3d4e5f6...
+Signature: MEUCIQDxX5k4r4V2s8e9t0jKlMnOpqRsT...
+============================================================
+This receipt proves your participation in this conversation.
+Receipt saved to client_receipt_1700000000.json
+```
+
+## Message Format
+
+### Signed Chat Message
+```json
+{
+  "type": "msg",
+  "seqno": 1,
+  "ts": 1700000000000,
+  "ct": "base64_encrypted_content",
+  "sig": "base64_rsa_signature"
+}
+```
+
+### Session Receipt
+```json
+{
+  "type": "receipt",
+  "peer": "client",
+  "first_seq": 1,
+  "last_seq": 5,
+  "transcript_sha256": "hash_value",
+  "sig": "base64_signature"
+}
+```
+
+## Security Features
+
+- **Mutual Authentication** - Both client and server verify certificates
+- **Perfect Forward Secrecy** - Ephemeral DH keys for each session
+- **Message Integrity** - RSA signatures prevent tampering
+- **Replay Protection** - Sequence numbers prevent message replay
+- **Non-Repudiation** - Session receipts provide conversation proof
+- **Salted Password Hashing** - Secure credential storage
+
+## File Structure
+
+```
+secure-chat-app/
+├── app/
+│   ├── common/
+│   │   ├── protocol.py    # Message definitions
+│   │   └── utils.py       # Cryptographic utilities
+│   ├── crypto/
+│   │   ├── aes.py         # AES encryption
+│   │   ├── dh.py          # Diffie-Hellman key exchange
+│   │   ├── pki.py         # Certificate handling
+│   │   └── sign.py        # RSA signing
+│   └── storage/
+│       └── db.py          # Database layer
+├── certs/                 # Certificate storage
+├── scripts/
+│   ├── gen_ca.py          # CA generation
+│   ├── gen_cert.py        # Certificate issuance
+│   └── gen_dh_params.py   # DH parameters
+├── client.py              # Chat client
+├── server.py              # Chat server
+└── README.md
+```
+
+## GitHub Repository
+
+📁 **Repository**: [https://github.com/yourusername/secure-chat-app](https://github.com/yourusername/secure-chat-app)
+
+## Troubleshooting
+
+**Certificate Errors**: Ensure all certificate generation steps are completed in order.
+
+**Database Connection**: Verify MySQL service is running and credentials in `.env` are correct.
+
+**Port Conflicts**: Change `SERVER_PORT` in client.py and server.py if 8080 is occupied.
+
+**DH Parameters**: Regenerate if seeing "DH parameters file not found" errors.
+
+## License
+
+MIT License - See LICENSE file for details.verified offline  
