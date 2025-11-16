@@ -3,3 +3,7 @@ PyMySQL
 python-dotenv
 pydantic
 rich
+cryptography==42.0.5
+pydantic==2.8.2
+mysql-connector-python==8.3.0
+python-dotenv==1.0.1

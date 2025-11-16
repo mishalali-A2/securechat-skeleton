@@ -1,50 +1,92 @@
-from cryptography import x509
-from cryptography.hazmat.primitives import serialization, hashes
-from cryptography.x509.oid import NameOID, ExtensionOID
-from cryptography.hazmat.primitives.asymmetric import rsa, padding
-from cryptography.hazmat.backends import default_backend
+"""
+Public Key Infrastructure utilities for certificate handling and validation.
+Provides certificate loading, parsing, and validation functions.
+"""
+
+import os
 import datetime
+from cryptography import x509
+from cryptography.hazmat.backends import default_backend
+from cryptography.x509.oid import NameOID
 
-def load_cert(pem: bytes) -> x509.Certificate:
-    return x509.load_pem_x509_certificate(pem, backend=default_backend())
 
-def verify_cert_chain(cert_pem: bytes, ca_cert_pem: bytes, expected_cn: str = None) -> bool:
-    cert = load_cert(cert_pem)
-    ca = load_cert(ca_cert_pem)
-    # 1. check signature: verify cert signed by CA's public key
-    ca_pub = ca.public_key()
-    try:
-        ca_pub.verify(cert.signature, cert.tbs_certificate_bytes,
-                      padding.PKCS1v15(), cert.signature_hash_algorithm)
-    except Exception:
-        return False
-    # 2. check validity dates
-    now = datetime.datetime.utcnow()
-    if not (cert.not_valid_before <= now <= cert.not_valid_after):
-        return False
-    # 3. check CN if provided
-    if expected_cn:
-        cn = cert.subject.get_attributes_for_oid(NameOID.COMMON_NAME)[0].value
-        if cn != expected_cn:
-            return False
-    return True
+class CertificateValidationException(Exception):
+    """Exception raised for certificate validation failures (BAD_CERT scenarios)."""
+    pass
 
-def create_self_signed_ca(name_cn: str, key: rsa.RSAPrivateKey, days=3650):
-    subject = issuer = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, name_cn)])
-    cert = x509.CertificateBuilder().subject_name(subject).issuer_name(issuer)\
-        .public_key(key.public_key()).serial_number(x509.random_serial_number())\
-        .not_valid_before(datetime.datetime.utcnow() - datetime.timedelta(days=1))\
-        .not_valid_after(datetime.datetime.utcnow() + datetime.timedelta(days=days))\
-        .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)\
-        .sign(key, hashes.SHA256(), default_backend())
-    return cert
 
-def issue_cert(subject_cn: str, subject_key: rsa.RSAPrivateKey, ca_key: rsa.RSAPrivateKey, ca_cert: x509.Certificate, days=365):
-    subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, subject_cn)])
-    cert = x509.CertificateBuilder().subject_name(subject).issuer_name(ca_cert.subject)\
-        .public_key(subject_key.public_key()).serial_number(x509.random_serial_number())\
-        .not_valid_before(datetime.datetime.utcnow() - datetime.timedelta(days=1))\
-        .not_valid_after(datetime.datetime.utcnow() + datetime.timedelta(days=days))\
-        .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)\
-        .sign(ca_key, hashes.SHA256(), default_backend())
-    return cert
+class CertificateManager:
+    """Manages certificate operations including loading and validation."""
+    
+    CERTIFICATES_DIRECTORY = "certs"
+    ROOT_CA_CERTIFICATE_FILENAME = "root_ca_certificate.pem"
+    ROOT_CA_PATH = os.path.join(CERTIFICATES_DIRECTORY, ROOT_CA_CERTIFICATE_FILENAME)
+
+    @staticmethod
+    def load_certificate_from_pem(certificate_pem: bytes) -> x509.Certificate:
+       
+        try:
+            return x509.load_pem_x509_certificate(
+                certificate_pem, 
+                default_backend()
+            )
+        except Exception as parsing_error:
+            raise CertificateValidationException(
+                f"Certificate parsing failed: {parsing_error}"
+            )
+
+    @classmethod
+    def load_root_ca_certificate(cls) -> x509.Certificate:
+       
+        try:
+            with open(cls.ROOT_CA_PATH, "rb") as certificate_file:
+                return cls.load_certificate_from_pem(certificate_file.read())
+        except FileNotFoundError:
+            raise FileNotFoundError(
+                f"Root CA certificate not found at {cls.ROOT_CA_PATH}"
+            )
+
+    @staticmethod
+    def extract_common_name(certificate: x509.Certificate) -> str:
+       
+        try:
+            common_name_attributes = certificate.subject.get_attributes_for_oid(
+                NameOID.COMMON_NAME
+            )
+            return common_name_attributes[0].value if common_name_attributes else ""
+        except IndexError:
+            return ""
+
+    @classmethod
+    def validate_certificate_chain(
+        cls,
+        certificate_pem: bytes,
+        expected_common_name: str,
+        trusted_ca_certificate: x509.Certificate
+    ):
+        
+        certificate_to_validate = cls.load_certificate_from_pem(certificate_pem)
+        
+        # 1. Verify certificate chain (issuer matches CA subject)
+        if certificate_to_validate.issuer != trusted_ca_certificate.subject:
+            raise CertificateValidationException(
+                "BAD_CERT: Certificate issuer does not match trusted CA (untrusted chain)."
+            )
+
+        # 2. Check validity period (using UTC to avoid deprecation warnings)
+        current_time_utc = datetime.datetime.now(datetime.timezone.utc)
+        valid_from = certificate_to_validate.not_valid_before_utc
+        valid_until = certificate_to_validate.not_valid_after_utc
+        
+        if current_time_utc < valid_from or current_time_utc > valid_until:
+            raise CertificateValidationException(
+                "BAD_CERT: Certificate is either expired or not yet valid."
+            )
+
+        # 3. Verify Common Name matches expected value
+        actual_common_name = cls.extract_common_name(certificate_to_validate)
+        if actual_common_name != expected_common_name:
+            raise CertificateValidationException(
+                f"BAD_CERT: Common Name mismatch. Expected: '{expected_common_name}', "
+                f"Actual: '{actual_common_name}'"
+            )
