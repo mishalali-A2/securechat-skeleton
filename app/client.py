@@ -12,16 +12,19 @@ import secrets
 import threading
 import time
 from typing import Optional
-from app.common.utils import decode_from_base64, encode_to_base64
+from app.common.utils import decode_from_base64, encode_to_base64, create_sha256_hash, create_sha256_hex_hash
 from app.crypto.pki import CertificateManager, CertificateValidationException
 from app.crypto.dh import DiffieHellmanKeyExchange
 from app.crypto.aes import AES128Cipher
+from app.crypto.sign import RSASigning
 from app.common.protocol import (
     CertificateExchangeMessage, 
     KeyExchangeMessage, 
     AuthenticationData, 
     SecurePayloadMessage, 
-    MessageType
+    MessageType,
+    SignedChatMessage,
+    SessionReceipt
 )
 
 
@@ -40,6 +43,16 @@ class SecureChatClient:
         self.session_key = None
         self.username = None
         self.running = False
+        self.sequence_number = 0
+        self.transcript = []
+        
+        # Load client's RSA private key for signing
+        try:
+            self.private_key = RSASigning.load_private_key("client")
+            print("[CLIENT] ✅ Loaded client RSA private key for signing")
+        except FileNotFoundError:
+            print("[CLIENT] ❌ Failed to load client private key for signing")
+            exit(1)
 
     def _load_client_certificate(self) -> bytes:
         """
@@ -167,6 +180,10 @@ class SecureChatClient:
             print(f"[CLIENT] ❌ Server certificate validation failed: {validation_error}")
             return None
 
+        # Extract server's public key for signature verification
+        self.server_public_key = RSASigning.extract_public_key_from_certificate(server_certificate_data)
+        print("[CLIENT] ✅ Extracted server public key for signature verification")
+
         # Phase 2: Key exchange
         session_key = self._perform_key_exchange(connection)
         if not session_key:
@@ -204,10 +221,12 @@ class SecureChatClient:
             return None
 
     def _start_chat_session(self, connection: socket.socket, session_key: bytes, username: str):
-        """Start interactive chat session."""
+        """Start interactive chat session with message signing."""
         self.session_key = session_key
         self.username = username
         self.running = True
+        self.sequence_number = 0
+        self.transcript = []
         
         aes_cipher = AES128Cipher(session_key)
         
@@ -216,39 +235,31 @@ class SecureChatClient:
         receive_thread.daemon = True
         receive_thread.start()
         
-        print(f"\n[CLIENT] 💬 Chat session started as '{username}'")
-        print("Type your messages below (type '/quit' to exit):")
+        print(f"\n[CLIENT] 💬 Secure chat session started as '{username}'")
+        print("🔐 All messages are now signed and verified for integrity")
+        print("Type your messages below:")
+        print("  /quit     - Exit chat and generate session receipt")
+        print("  /receipt  - Generate session receipt without exiting")
         print("-" * 50)
         
         try:
             while self.running:
                 try:
-                    # Show prompt
                     print(f"{self.username}> ", end='', flush=True)
                     message = input().strip()
                     
                     if message.lower() == '/quit':
+                        self._generate_session_receipt(connection)
                         print("[CLIENT] 👋 Goodbye!")
                         self.running = False
                         break
+                    elif message.lower() == '/receipt':
+                        self._generate_session_receipt(connection)
                     elif message:
-                        # Send chat message - use the correct message type
-                        chat_data = {
-                            'content': message,
-                            'timestamp': int(time.time())
-                        }
-                        
-                        plaintext = json.dumps(chat_data).encode()
-                        encrypted = aes_cipher.encrypt_data(plaintext)
-                        
-                        # Use SecurePayloadMessage with CHAT_MESSAGE type
-                        secure_msg = SecurePayloadMessage(
-                            message_kind=MessageType.CHAT_MESSAGE,
-                            encrypted_content=encode_to_base64(encrypted)
-                        )
-                        connection.sendall(secure_msg.to_json_string().encode())
+                        self._send_signed_message(connection, aes_cipher, message)
                         
                 except KeyboardInterrupt:
+                    self._generate_session_receipt(connection)
                     print("\n[CLIENT] 👋 Goodbye!")
                     self.running = False
                     break
@@ -260,6 +271,47 @@ class SecureChatClient:
         finally:
             self.running = False
             connection.close()
+
+    def _send_signed_message(self, connection: socket.socket, aes_cipher: AES128Cipher, plaintext: str):
+        """Send a signed and encrypted chat message."""
+        # Increment sequence number
+        self.sequence_number += 1
+        timestamp = int(time.time() * 1000)  # Unix milliseconds
+        
+        # Encrypt the message
+        plaintext_bytes = plaintext.encode('utf-8')
+        ciphertext = aes_cipher.encrypt_data(plaintext_bytes)
+        ciphertext_b64 = encode_to_base64(ciphertext)
+        
+        # Compute hash: SHA256(seqno || timestamp || ciphertext)
+        hash_data = str(self.sequence_number).encode() + str(timestamp).encode() + ciphertext
+        message_hash = create_sha256_hash(hash_data)
+        
+        # Sign the hash with client's private key
+        signature = RSASigning.sign_data(self.private_key, message_hash)
+        signature_b64 = encode_to_base64(signature)
+        
+        # Create signed message
+        signed_msg = {
+            'type': MessageType.CHAT_MESSAGE_SIGNED,
+            'seqno': self.sequence_number,
+            'ts': timestamp,
+            'ct': ciphertext_b64,
+            'sig': signature_b64
+        }
+        
+        # Add to transcript
+        self.transcript.append({
+            'seqno': self.sequence_number,
+            'timestamp': timestamp,
+            'ciphertext': ciphertext_b64,
+            'signature': signature_b64,
+            'peer_cert_fingerprint': 'server'
+        })
+        
+        # Send message
+        connection.sendall(json.dumps(signed_msg).encode())
+        print(f"[CLIENT] 📨 Sent signed message (seq: {self.sequence_number})")
 
     def _receive_messages(self, connection: socket.socket, aes_cipher: AES128Cipher):
         """Receive messages from server in a separate thread."""
@@ -284,26 +336,108 @@ class SecureChatClient:
                 print(f"\n[CLIENT] ❌ Error receiving messages: {e}")
 
     def _process_received_message(self, data: bytes, aes_cipher: AES128Cipher):
-        """Process received message from server."""
+        """Process received signed message from server."""
         try:
             message_data = json.loads(data.decode())
-            message_type = message_data.get('message_type')
+            message_type = message_data.get('type')
             
-            if message_type == MessageType.CHAT_MESSAGE:
-                encrypted_content = decode_from_base64(message_data['encrypted_payload'])
-                decrypted = aes_cipher.decrypt_data(encrypted_content)
-                chat_data = json.loads(decrypted.decode())
+            if message_type == MessageType.CHAT_MESSAGE_SIGNED:
+                # Extract message components
+                seqno = message_data.get('seqno')
+                timestamp = message_data.get('ts')
+                ciphertext_b64 = message_data.get('ct')
+                signature_b64 = message_data.get('sig')
                 
-                sender = chat_data.get('sender', 'Unknown')
-                content = chat_data.get('content', '')
+                # Verify sequence number (replay protection)
+                if seqno <= self.sequence_number:
+                    print(f"\n[CLIENT] ❌ Replay attack detected: seqno {seqno}")
+                    return
                 
-                # Only show messages from other users
-                if sender != self.username:
-                    print(f"\n[{sender}]: {content}")
-                    print(f"{self.username}> ", end='', flush=True)
+                # Decode components
+                ciphertext = decode_from_base64(ciphertext_b64)
+                signature = decode_from_base64(signature_b64)
+                
+                # Compute hash for verification: SHA256(seqno || timestamp || ciphertext)
+                hash_data = str(seqno).encode() + str(timestamp).encode() + ciphertext
+                computed_hash = create_sha256_hash(hash_data)
+                
+                # Verify signature using server's public key
+                if not RSASigning.verify_signature(self.server_public_key, computed_hash, signature):
+                    print(f"\n[CLIENT] ❌ Server signature verification failed!")
+                    return
+                
+                # Decrypt the message
+                plaintext = aes_cipher.decrypt_data(ciphertext)
+                message_content = plaintext.decode('utf-8')
+                
+                # Update sequence number
+                self.sequence_number = seqno
+                
+                # Add to transcript
+                self.transcript.append({
+                    'seqno': seqno,
+                    'timestamp': timestamp,
+                    'ciphertext': ciphertext_b64,
+                    'signature': signature_b64,
+                    'peer_cert_fingerprint': 'server'
+                })
+                
+                # Display message
+                print(f"\n[SERVER]: {message_content}")
+                print(f"{self.username}> ", end='', flush=True)
+                
+            elif message_type == MessageType.SESSION_RECEIPT:
+                # Handle server's session receipt
+                print(f"\n[CLIENT] 📄 Received session receipt from server")
+                print(f"{self.username}> ", end='', flush=True)
                     
         except Exception as e:
             print(f"\n[CLIENT] ❌ Error processing message: {e}")
+
+    def _generate_session_receipt(self, connection: socket.socket):
+        """Generate and display session receipt for non-repudiation."""
+        if not self.transcript:
+            print("[CLIENT] No messages exchanged in this session")
+            return
+        
+        # Compute transcript hash
+        transcript_data = b""
+        for entry in self.transcript:
+            line = f"{entry['seqno']}|{entry['timestamp']}|{entry['ciphertext']}|{entry['signature']}|{entry['peer_cert_fingerprint']}\n"
+            transcript_data += line.encode()
+        
+        transcript_hash = create_sha256_hex_hash(transcript_data)
+        
+        # Sign transcript hash with client's private key
+        signature = RSASigning.sign_data(self.private_key, transcript_hash.encode())
+        signature_b64 = encode_to_base64(signature)
+        
+        # Create session receipt
+        receipt = {
+            'type': MessageType.SESSION_RECEIPT,
+            'peer': 'client',
+            'first_seq': self.transcript[0]['seqno'],
+            'last_seq': self.transcript[-1]['seqno'],
+            'transcript_sha256': transcript_hash,
+            'sig': signature_b64
+        }
+        
+        print("\n" + "="*60)
+        print("CLIENT SESSION RECEIPT (Non-Repudiation Proof)")
+        print("="*60)
+        print(f"Peer: {receipt['peer']}")
+        print(f"Message Range: {receipt['first_seq']} - {receipt['last_seq']}")
+        print(f"Transcript Hash: {receipt['transcript_sha256']}")
+        print(f"Signature: {receipt['sig'][:50]}...")
+        print("="*60)
+        print("This receipt proves your participation in this conversation.")
+        print("Any modification to the transcript will invalidate this signature.")
+        
+        # Save receipt to file
+        receipt_filename = f"client_receipt_{int(time.time())}.json"
+        with open(receipt_filename, "w") as f:
+            json.dump(receipt, f, indent=2)
+        print(f"Receipt saved to {receipt_filename}")
 
     def run_client_operation(self, command_line_args):
         """
@@ -329,7 +463,7 @@ class SecureChatClient:
 
                 if authentication_result and isinstance(authentication_result, bytes):
                     print("[CLIENT] ✅ Authentication completed. Session key established.")
-                    # Start chat session
+                    # Start chat session with signed messages
                     self._start_chat_session(client_socket, authentication_result, command_line_args.username)
                 else:
                     print("[CLIENT] ❌ Authentication failed. Closing connection.")
